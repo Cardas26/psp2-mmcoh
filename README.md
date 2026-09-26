@@ -19,8 +19,8 @@ Wanted to play this game on the Vita myself, so vibecoded it.
   - [libshacccg](https://cimmerian.gitbook.io/vita-troubleshooting-guide/shader-compiler/extract-libshacccg.suprx)
   - [FdFix](https://github.com/TheOfficialFloW/FdFix/releases/). Don't install
     this if RePatch is already installed.
-  - Optional: Install [PSVshell](https://github.com/Electry/PSVshell) to set
-    the CPU to 500MHz and ES4 GPU to 222MHz (defaults: CPU 444MHz, GPU 166MHz)
+  - Optional: Install [PSVshell](https://github.com/Electry/PSVshell) to
+    increase CPU and GPU clock speeds
 - 1 GB free space on `ux0:` for setup, 600 MB afterwards.
 - The Android game, **version 1.4 only**:
   - .apk file
@@ -36,10 +36,9 @@ Wanted to play this game on the Vita myself, so vibecoded it.
 4. Launch the game, answer **Yes** to *Set up now?*.
    - Setup unpacks, checks and patches the files, then deletes the .obb file.
    - Keep the Vita on; it takes a few minutes. The game starts when done.
-   - Note: game setup can also be done using the
-     [`prepare_data.py`](tools/prepare_data.py) script, should the automatic
-     game setup misbehave for any reason.
 5. Keep `ClashOfHeroes.apk`: the game reads it at every launch.
+
+Note: if automatic setup fails, manual setup below can also be used.
 
 ### Manual setup
 
@@ -65,15 +64,14 @@ Needs [Python 3](https://www.python.org/downloads/) and
 ## Controls
 
 Touch works everywhere. Physical button controls cover the map, battles and
-most menus (see below). Formal gamepad support was not implemented by TAG
-Games, and will need more work.
+most menus (see below).
 
 | Where | Button | Action |
 |---|---|---|
 | Map | D-pad or Left stick | move the hero |
 | | Cross | interact with the hero's tile |
 | | L / R | quest log / pause menu |
-| Battle | D-pad or Left stick | pick a column and a row |
+| Battle | D-pad or Left stick | move along columns and rows. Hold to speed up  |
 | | Cross / Circle | pick up or drop a unit / cancel |
 | | Triangle | remove the selected unit |
 | | Square | cast the hero's spell |
@@ -88,8 +86,10 @@ Games, and will need more work.
 
 ## Known issues
 
+- Full physical button support was not implemented by TAG Games, and will
+  need more work to implement
 - Busy battles can briefly drop fps below 60. Set CPU to 500MHz and GPU to
-  222MHz to reduce these frame dips.
+  222MHz to reduce these frame dips (defaults: 444 MHz CPU and 166MHz GPU).
 - A screen's first visit can pause while it loads.
 - The ENEMY TURN banner flashes black, and battles have fewer effects than
   on PC. The stock Android game does the same.

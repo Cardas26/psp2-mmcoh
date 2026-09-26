@@ -1,0 +1,18 @@
+name: Bug report
+description: A crash, a hang, or something that behaves differently from the Android game
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Say where in the game it was.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >-
+        From the diagnostics build: ux0:data/mmcoh/debug.log, watchdog.log if present, and
+        Cache/MoFloLog.txt. For a crash, also the newest ux0:data/*.psp2dmp. Drag the files in.

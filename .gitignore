@@ -1,0 +1,16 @@
+/mmcoh/
+*.apk
+*.obb
+loader/build*/
+loader/lib/vitagl/libvitaGL.a
+loader/lib/vitagl/.vitagl_flags.stamp
+*.o
+*.a
+!loader/lib/kubridge/*.a
+*.velf
+*.self
+*.vpk
+*.sfo
+*.psp2dmp
+__pycache__/
+.DS_Store

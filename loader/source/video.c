@@ -1,6 +1,7 @@
 #include "video.h"
 
 #include "subtitles.h"
+#include "reimpl/controls.h"
 #include "reimpl/iopath.h"
 #include "utils/logger.h"
 #include "utils/utils.h"
@@ -10,7 +11,6 @@
 
 #include <psp2/avplayer.h>
 #include <psp2/audioout.h>
-#include <psp2/ctrl.h>
 #include <psp2/touch.h>
 #include <psp2/io/dirent.h>
 #include <psp2/io/stat.h>
@@ -441,12 +441,9 @@ void video_dismiss(void) {
 }
 
 static bool skip_pressed(void) {
-    SceCtrlData pad;
     SceTouchData touch;
     bool down = false;
-    if (sceCtrlPeekBufferPositive(0, &pad, 1) > 0 &&
-        (pad.buttons & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE | SCE_CTRL_SQUARE |
-                        SCE_CTRL_TRIANGLE | SCE_CTRL_START)))
+    if (controls_skip_held())
         down = true;
     if (sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) > 0 && touch.reportNum > 0)
         down = true;

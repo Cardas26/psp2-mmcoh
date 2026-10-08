@@ -43,6 +43,7 @@
 #include "reimpl/controls.h"
 #include "reimpl/iocontent.h"
 #include "video.h"
+#include "osd.h"
 
 int _newlib_heap_size_user = 256 * 1024 * 1024;
 
@@ -130,6 +131,7 @@ int main() {
         FrameBegin(&jni, NULL, delta_time, (jlong)now_us);
         pthread_mutex_unlock(&g_engine_call_mutex);
         video_frame();
+        osd_frame();
         gl_swap();
 
 #ifdef PERF_COUNTER_ENABLED

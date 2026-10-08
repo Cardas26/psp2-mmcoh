@@ -66,6 +66,8 @@ Needs [Python 3](https://www.python.org/downloads/) and
 Touch works everywhere. Physical button controls cover the map, battles and
 most menus (see below).
 
+The defaults are below; remap any of them in `ux0:/data/mmcoh/controls.ini`.
+
 | Where | Button | Action |
 |---|---|---|
 | Map | D-pad or Left stick | move the hero |
@@ -97,7 +99,7 @@ most menus (see below).
 
 ## Reporting a bug
 
-1. Install the **diagnostics** build (see *Building from source*).
+1. Install the **diagnostics** build, `mmcoh-diagnostics.vpk` from the [latest release](../../releases/latest).
 2. Reproduce the problem.
 3. Attach to a [bug report](../../issues/new/choose):
    - `ux0:data/mmcoh/debug.log`;

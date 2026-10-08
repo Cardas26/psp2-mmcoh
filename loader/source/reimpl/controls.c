@@ -6,11 +6,17 @@
  */
 
 #include "reimpl/controls.h"
+#include "osd.h"
+#include "utils/campaign_tap.h"
 #include "utils/logger.h"
 #include "utils/utils.h"
 
+#include <keymap/keymap.h>
+
 #include <math.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
 #include <psp2/ctrl.h>
 #include <psp2/motion.h>
 #include <psp2/touch.h>
@@ -30,7 +36,7 @@ volatile uint32_t g_poll_stage = 0;
 
 #define LEFT_ANALOG_DEADZONE  0.16f
 #define RIGHT_ANALOG_DEADZONE 0.16f
-#define LEFT_STICK_DPAD_DEADZONE 40
+#define STICK_DIR_DEADZONE 40
 
 void coord_normalize(float * x, float * y, float deadzone) {
     float magnitude = sqrtf((*x * *x) + (*y * *y));
@@ -54,8 +60,9 @@ void poll_accel();
 
 void poll_stick(ControlsStickId which, float raw_x, float raw_y, float * readings_x, float * readings_y, float deadzone);
 
-static void poll_virtual_cursor(uint32_t claimed_buttons);
-static void poll_battle_pause_tap(uint32_t claimed_buttons);
+static void poll_virtual_cursor(uint32_t claimed);
+static void poll_battle_pause_tap(uint32_t claimed);
+static void keymap_load(void);
 
 bool map_dpad_is_active(void);
 
@@ -119,6 +126,8 @@ void controls_init() {
     if (ret < 0)
         l_error("controls: sceMotionStartSampling failed: 0x%08X", ret);
 
+    keymap_load();
+
     SceUID t = sceKernelCreateThread("controls_poll", controls_poll_thread,
                                      CONTROLS_POLL_PRIORITY,
                                      CONTROLS_POLL_STACK_SIZE, 0, 0, NULL);
@@ -178,6 +187,10 @@ static void touch_id_free(int raw_id) {
 #define TOUCH_PANEL_W 1920.0f
 #define TOUCH_PANEL_H 1088.0f
 
+static bool touch_pinned[TOUCH_ID_SLOTS];
+static float touch_pin_x[TOUCH_ID_SLOTS];
+static float touch_pin_y[TOUCH_ID_SLOTS];
+
 void poll_touch() {
     POLL_STAGE(1);
     sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1);
@@ -210,10 +223,15 @@ void poll_touch() {
         if (!finger_down) {
             l_debug("[touch-down-diag] DOWN id=%d raw_id=%d pos=(%.1f,%.1f)",
                 small_id, touch.report[i].id, x, y);
-            controls_handler_touch(small_id, x, y, CONTROLS_ACTION_DOWN);
-        } else {
-            controls_handler_touch(small_id, x, y, CONTROLS_ACTION_MOVE);
+            touch_pinned[small_id] = campaign_tap_pin(x, y,
+                &touch_pin_x[small_id], &touch_pin_y[small_id]);
         }
+        if (touch_pinned[small_id]) {
+            x = touch_pin_x[small_id];
+            y = touch_pin_y[small_id];
+        }
+        controls_handler_touch(small_id, x, y,
+            finger_down ? CONTROLS_ACTION_MOVE : CONTROLS_ACTION_DOWN);
     }
 
     for (int i = 0; i < touch_old.reportNum; i++) {
@@ -238,6 +256,11 @@ void poll_touch() {
 
             l_debug("[touch-down-diag] UP id=%d raw_id=%d pos=(%.1f,%.1f)",
                 small_id, touch_old.report[i].id, x, y);
+            if (touch_pinned[small_id]) {
+                x = touch_pin_x[small_id];
+                y = touch_pin_y[small_id];
+                touch_pinned[small_id] = false;
+            }
             controls_handler_touch(small_id, x, y, CONTROLS_ACTION_UP);
         }
     }
@@ -262,6 +285,125 @@ static ButtonMapping mapping[] = {
 
 static uint32_t old_buttons = 0, current_buttons = 0, pressed_buttons = 0, released_buttons = 0;
 
+enum {
+    CTX_MAP    = 1,
+    CTX_BATTLE = 2,
+    CTX_MENUS  = 4,
+    CTX_PLAY   = CTX_MAP | CTX_BATTLE | CTX_MENUS,
+};
+enum {
+    ACT_UP, ACT_DOWN, ACT_LEFT, ACT_RIGHT, ACT_CONFIRM, ACT_BACK,
+    ACT_QUESTLOG, ACT_MAPMENU, ACT_BATTLEMENU, ACT_ZOOM, ACT_SPELL,
+    ACT_REMOVE, ACT_REINFORCE, ACT_ENDTURN, ACT_SETUP, ACT_CURSORTAP,
+    ACT_CURSORSLOW, ACT_N
+};
+#define ACT(a) (1u << ACT_##a)
+
+static const struct km_act pad_acts[ACT_N] = {
+    [ACT_UP]         = { "Up", "Up, LStickUp",
+                         "map: step up; a list: up; battle: the row up; elsewhere: the cursor",
+                         KM_BUTTONS, 2, CTX_PLAY },
+    [ACT_DOWN]       = { "Down", "Down, LStickDown",
+                         "map: step down; a list: down; battle: the row down; elsewhere: the cursor",
+                         KM_BUTTONS, 2, CTX_PLAY },
+    [ACT_LEFT]       = { "Left", "Left, LStickLeft",
+                         "map: step left; Yes/No: Yes; dwelling: one fewer; battle: the column left; elsewhere: the cursor",
+                         KM_BUTTONS, 2, CTX_PLAY },
+    [ACT_RIGHT]      = { "Right", "Right, LStickRight",
+                         "map: step right; Yes/No: No; dwelling: one more; battle: the column right; elsewhere: the cursor",
+                         KM_BUTTONS, 2, CTX_PLAY },
+    [ACT_CONFIRM]    = { "Confirm", "Cross",
+                         "map: use the hero's tile; next, choose, Yes, OK, close, Buy, Continue; VS: Battle; battle: take or drop a column",
+                         KM_BUTTONS, 1, CTX_PLAY },
+    [ACT_BACK]       = { "Back", "Circle",
+                         "cancel, No, close, back, Exit game; VS: Flee; battle: put the column back; lifts a stuck cursor tap",
+                         KM_BUTTONS, 1, CTX_PLAY },
+    [ACT_QUESTLOG]   = { "QuestLog", "L", "map: the quest log", KM_BUTTONS, 0, CTX_MAP },
+    [ACT_MAPMENU]    = { "MapMenu", "R", "map: the pause menu", KM_BUTTONS, 0, CTX_MAP },
+    [ACT_BATTLEMENU] = { "BattleMenu", "L", "battle: the pause menu", KM_BUTTONS, 0, CTX_BATTLE },
+    [ACT_ZOOM]       = { "Zoom", "R", "battle: zoom the board in or out", KM_BUTTONS, 0, CTX_BATTLE },
+    [ACT_SPELL]      = { "Spell", "Square", "battle: the hero's spell", KM_BUTTONS, 0, CTX_BATTLE },
+    [ACT_REMOVE]     = { "Remove", "Triangle", "battle: remove the selected unit", KM_BUTTONS, 0, CTX_BATTLE },
+    [ACT_REINFORCE]  = { "Reinforce", "Select", "battle: call reinforcements", KM_BUTTONS, 0, CTX_BATTLE },
+    [ACT_ENDTURN]    = { "EndTurn", "Start", "battle: end the turn", KM_BUTTONS, 0, CTX_BATTLE },
+    [ACT_SETUP]      = { "Setup", "Square", "VS screen: set up units", KM_BUTTONS, 0, CTX_MENUS },
+    [ACT_CURSORTAP]  = { "CursorTap", "R",
+                         "other screens: tap at the cursor, drag while held", KM_BUTTONS, 0, CTX_MENUS },
+    [ACT_CURSORSLOW] = { "CursorSlow", "L",
+                         "other screens: the cursor moves slowly while held", KM_BUTTONS, 0, CTX_MENUS },
+};
+
+static struct km_map g_km;
+static uint32_t act_shares[ACT_N];
+static uint32_t acts_held = 0, acts_pressed = 0, acts_released = 0;
+static volatile int skip_held = 0;
+
+int controls_skip_held(void) {
+    return skip_held;
+}
+
+static void keymap_log(const char *line) {
+    (void)line;
+    l_info("%s", line);
+}
+
+static void keymap_load(void) {
+    g_km.path = DATA_PATH "controls.ini";
+    g_km.aside = DATA_PATH "controls-unreadable.ini";
+    g_km.title = "Clash of Heroes";
+    g_km.header =
+        "; Touch is not a button: it always taps. Any button or a touch skips a cutscene.\n"
+        "; A button can do one thing on each screen: the map, a battle, and every other screen (menus,\n"
+        ";   conversations, the VS screen), where the directions move a cursor. Two actions on one button\n"
+        ";   and one screen are a mistake, named on the screen at start.\n";
+    g_km.acts = pad_acts;
+    g_km.n_acts = ACT_N;
+    g_km.avail = (1u << KM_N) - 1;
+    g_km.log = keymap_log;
+    km_load(&g_km);
+    char note[96];
+    for (int i = 0; km_note(&g_km, i, note, sizeof(note)); i++)
+        osd_queue(note, 4000);
+
+    for (int a = 0; a < ACT_N; a++) {
+        const struct km_bind *x = &g_km.bind[a];
+        act_shares[a] = 1u << a;
+        for (int b = 0; b < ACT_N; b++) {
+            const struct km_bind *y = &g_km.bind[b];
+            for (int i = 0; i < x->n; i++)
+                for (int j = 0; j < y->n; j++)
+                    if (x->mod[i] == y->mod[j] && x->btn[i] == y->btn[j])
+                        act_shares[a] |= 1u << b;
+        }
+    }
+}
+
+static uint32_t pad_on(const SceCtrlData *pad) {
+    static const struct { uint32_t sce; uint8_t km; } bits[] = {
+        { SCE_CTRL_UP, KM_UP }, { SCE_CTRL_DOWN, KM_DOWN },
+        { SCE_CTRL_LEFT, KM_LEFT }, { SCE_CTRL_RIGHT, KM_RIGHT },
+        { SCE_CTRL_CROSS, KM_CROSS }, { SCE_CTRL_CIRCLE, KM_CIRCLE },
+        { SCE_CTRL_SQUARE, KM_SQUARE }, { SCE_CTRL_TRIANGLE, KM_TRI },
+        { SCE_CTRL_L1 | SCE_CTRL_LTRIGGER, KM_L }, { SCE_CTRL_R1 | SCE_CTRL_RTRIGGER, KM_R },
+        { SCE_CTRL_START, KM_START }, { SCE_CTRL_SELECT, KM_SELECT },
+    };
+    uint32_t on = 0;
+    for (size_t i = 0; i < sizeof(bits) / sizeof(bits[0]); i++)
+        if (pad->buttons & bits[i].sce)
+            on |= 1u << bits[i].km;
+    int lx = (int)pad->lx - 128, ly = (int)pad->ly - 128;
+    int rx = (int)pad->rx - 128, ry = (int)pad->ry - 128;
+    if (ly < -STICK_DIR_DEADZONE) on |= 1u << KM_LS_UP;
+    if (ly >  STICK_DIR_DEADZONE) on |= 1u << KM_LS_DOWN;
+    if (lx < -STICK_DIR_DEADZONE) on |= 1u << KM_LS_LEFT;
+    if (lx >  STICK_DIR_DEADZONE) on |= 1u << KM_LS_RIGHT;
+    if (ry < -STICK_DIR_DEADZONE) on |= 1u << KM_RS_UP;
+    if (ry >  STICK_DIR_DEADZONE) on |= 1u << KM_RS_DOWN;
+    if (rx < -STICK_DIR_DEADZONE) on |= 1u << KM_RS_LEFT;
+    if (rx >  STICK_DIR_DEADZONE) on |= 1u << KM_RS_RIGHT;
+    return on;
+}
+
 static float analog_lx[3] = { 0 };
 static float analog_ly[3] = { 0 };
 static float analog_rx[3] = { 0 };
@@ -280,7 +422,7 @@ static float cursor_y = CURSOR_SCREEN_H / 2.0f;
 static int cursor_click_active = 0;
 static uint64_t cursor_last_us = 0;
 
-static void poll_virtual_cursor(uint32_t claimed_buttons) {
+static void poll_virtual_cursor(uint32_t claimed) {
     if (map_dpad_is_active() || battle_dpad_is_active()) {
         if (cursor_click_active) {
             controls_handler_touch(CURSOR_TOUCH_ID, cursor_x, cursor_y, CONTROLS_ACTION_UP);
@@ -289,7 +431,7 @@ static void poll_virtual_cursor(uint32_t claimed_buttons) {
         return;
     }
 
-    uint32_t cursor_pressed = pressed_buttons & ~claimed_buttons;
+    uint32_t cursor_pressed = acts_pressed & ~claimed;
 
     uint64_t now_us = sceKernelGetProcessTimeWide();
     float dt = cursor_last_us ? (float)((double)(now_us - cursor_last_us) / 1000000.0) : 0.0f;
@@ -304,23 +446,23 @@ static void poll_virtual_cursor(uint32_t claimed_buttons) {
         return;
     }
 
-    if ((pressed_buttons & SCE_CTRL_CIRCLE) && cursor_click_active) {
+    if ((acts_pressed & ACT(BACK)) && cursor_click_active) {
         controls_handler_touch(CURSOR_TOUCH_ID, cursor_x, cursor_y, CONTROLS_ACTION_UP);
         cursor_click_active = 0;
     }
 
     float dx = 0.0f, dy = 0.0f;
-    if (current_buttons & SCE_CTRL_LEFT)  dx -= 1.0f;
-    if (current_buttons & SCE_CTRL_RIGHT) dx += 1.0f;
-    if (current_buttons & SCE_CTRL_UP)    dy -= 1.0f;
-    if (current_buttons & SCE_CTRL_DOWN)  dy += 1.0f;
+    if (acts_held & ACT(LEFT))  dx -= 1.0f;
+    if (acts_held & ACT(RIGHT)) dx += 1.0f;
+    if (acts_held & ACT(UP))    dy -= 1.0f;
+    if (acts_held & ACT(DOWN))  dy += 1.0f;
     if (dx != 0.0f && dy != 0.0f) {
         dx *= CURSOR_DIAGONAL_SCALE;
         dy *= CURSOR_DIAGONAL_SCALE;
     }
 
     float speed = CURSOR_SPEED_PX_PER_SEC;
-    if (current_buttons & SCE_CTRL_L1) speed *= CURSOR_PRECISION_MULTIPLIER;
+    if (acts_held & ACT(CURSORSLOW)) speed *= CURSOR_PRECISION_MULTIPLIER;
 
     float old_x = cursor_x, old_y = cursor_y;
     cursor_x += dx * speed * dt;
@@ -330,9 +472,9 @@ static void poll_virtual_cursor(uint32_t claimed_buttons) {
     if (cursor_y < 0.0f) cursor_y = 0.0f;
     if (cursor_y > CURSOR_SCREEN_H) cursor_y = CURSOR_SCREEN_H;
 
-    int click_pressed  = (cursor_pressed   & SCE_CTRL_R1) != 0;
-    int click_released = (released_buttons & SCE_CTRL_R1) != 0;
-    int click_held     = (current_buttons  & SCE_CTRL_R1) != 0;
+    int click_pressed  = (cursor_pressed & ACT(CURSORTAP)) != 0;
+    int click_released = (acts_released  & ACT(CURSORTAP)) != 0;
+    int click_held     = (acts_held      & ACT(CURSORTAP)) != 0;
 
     if (click_released && cursor_click_active) {
         controls_handler_touch(CURSOR_TOUCH_ID, old_x, old_y, CONTROLS_ACTION_UP);
@@ -353,16 +495,16 @@ static void poll_virtual_cursor(uint32_t claimed_buttons) {
 
 static int pause_tap_active = 0;
 
-static void poll_battle_pause_tap(uint32_t claimed_buttons) {
+static void poll_battle_pause_tap(uint32_t claimed) {
     if (pause_tap_active) {
-        if ((released_buttons & SCE_CTRL_L1) || !battle_dpad_is_active()) {
+        if ((acts_released & ACT(BATTLEMENU)) || !battle_dpad_is_active()) {
             controls_handler_touch(CURSOR_TOUCH_ID, BATTLE_PAUSE_TAP_X, BATTLE_PAUSE_TAP_Y,
                                    CONTROLS_ACTION_UP);
             pause_tap_active = 0;
         }
         return;
     }
-    if ((pressed_buttons & ~claimed_buttons & SCE_CTRL_L1) &&
+    if ((acts_pressed & ~claimed & ACT(BATTLEMENU)) &&
         battle_dpad_is_active() && touch.reportNum == 0) {
         pause_tap_active = 1;
         controls_handler_touch(CURSOR_TOUCH_ID, BATTLE_PAUSE_TAP_X, BATTLE_PAUSE_TAP_Y,
@@ -373,7 +515,7 @@ static void poll_battle_pause_tap(uint32_t claimed_buttons) {
 typedef int (*ButtonActionFn)(int param);
 
 typedef struct {
-    uint32_t sce_button;
+    int act;
     ButtonActionFn fn;
     int param;
     int repeats;
@@ -404,49 +546,49 @@ static int action_map_quest_menu(int unused)        { (void)unused; return map_q
 static int action_map_pause_menu(int unused)        { (void)unused; return map_pause_menu(); }
 
 static const ButtonAction button_actions[] = {
-    { SCE_CTRL_UP,       action_map_move, 0 },
-    { SCE_CTRL_DOWN,     action_map_move, 1 },
-    { SCE_CTRL_LEFT,     action_map_move, 2 },
-    { SCE_CTRL_RIGHT,    action_map_move, 3 },
-    { SCE_CTRL_CROSS,    action_map_interact, 0 },
-    { SCE_CTRL_L1,       action_map_quest_menu, 0 },
-    { SCE_CTRL_R1,       action_map_pause_menu, 0 },
+    { ACT_UP,          action_map_move, 0 },
+    { ACT_DOWN,        action_map_move, 1 },
+    { ACT_LEFT,        action_map_move, 2 },
+    { ACT_RIGHT,       action_map_move, 3 },
+    { ACT_CONFIRM,     action_map_interact, 0 },
+    { ACT_QUESTLOG,    action_map_quest_menu, 0 },
+    { ACT_MAPMENU,     action_map_pause_menu, 0 },
 
-    { SCE_CTRL_CROSS,    action_dialogue_confirm, 0 },
-    { SCE_CTRL_CIRCLE,   action_dialogue_cancel, 0 },
-    { SCE_CTRL_CROSS,    action_prompt_answer, 1 },
-    { SCE_CTRL_CIRCLE,   action_prompt_answer, 0 },
-    { SCE_CTRL_LEFT,     action_dialogue_choice_horizontal, 1 },
-    { SCE_CTRL_RIGHT,    action_dialogue_choice_horizontal, 0 },
-    { SCE_CTRL_UP,       action_dialogue_choice_vertical, -1 },
-    { SCE_CTRL_DOWN,     action_dialogue_choice_vertical, 1 },
+    { ACT_CONFIRM,     action_dialogue_confirm, 0 },
+    { ACT_BACK,        action_dialogue_cancel, 0 },
+    { ACT_CONFIRM,     action_prompt_answer, 1 },
+    { ACT_BACK,        action_prompt_answer, 0 },
+    { ACT_LEFT,        action_dialogue_choice_horizontal, 1 },
+    { ACT_RIGHT,       action_dialogue_choice_horizontal, 0 },
+    { ACT_UP,          action_dialogue_choice_vertical, -1 },
+    { ACT_DOWN,        action_dialogue_choice_vertical, 1 },
 
-    { SCE_CTRL_CROSS,    action_screen_close, 1 },
-    { SCE_CTRL_CIRCLE,   action_screen_close, 0 },
-    { SCE_CTRL_LEFT,     action_dwelling_change_amount, -1 },
-    { SCE_CTRL_RIGHT,    action_dwelling_change_amount, 1 },
+    { ACT_CONFIRM,     action_screen_close, 1 },
+    { ACT_BACK,        action_screen_close, 0 },
+    { ACT_LEFT,        action_dwelling_change_amount, -1 },
+    { ACT_RIGHT,       action_dwelling_change_amount, 1 },
 
-    { SCE_CTRL_CROSS,    action_bookend_next, 0 },
-    { SCE_CTRL_CIRCLE,   action_bookend_next, 0 },
+    { ACT_CONFIRM,     action_bookend_next, 0 },
+    { ACT_BACK,        action_bookend_next, 0 },
 
-    { SCE_CTRL_CROSS,    action_advdeath_select, 1 },
-    { SCE_CTRL_CIRCLE,   action_advdeath_select, 0 },
+    { ACT_CONFIRM,     action_advdeath_select, 1 },
+    { ACT_BACK,        action_advdeath_select, 0 },
 
-    { SCE_CTRL_CROSS,    action_battleintro_select, 0 },
-    { SCE_CTRL_CIRCLE,   action_battleintro_select, 1 },
-    { SCE_CTRL_SQUARE,   action_battleintro_select, 2 },
+    { ACT_CONFIRM,     action_battleintro_select, 0 },
+    { ACT_BACK,        action_battleintro_select, 1 },
+    { ACT_SETUP,       action_battleintro_select, 2 },
 
-    { SCE_CTRL_LEFT,     action_battle_column_move, -1, 1 },
-    { SCE_CTRL_RIGHT,    action_battle_column_move, 1, 1 },
-    { SCE_CTRL_CROSS,    action_battle_column_click, 0 },
-    { SCE_CTRL_CIRCLE,   action_battle_column_cancel, 0 },
-    { SCE_CTRL_R1,       action_battle_zoom_toggle, 0 },
-    { SCE_CTRL_SQUARE,   action_battle_cast_spell, 0 },
-    { SCE_CTRL_UP,       action_battle_row_move, 1, 1 },
-    { SCE_CTRL_DOWN,     action_battle_row_move, -1, 1 },
-    { SCE_CTRL_TRIANGLE, action_battle_kill, 0 },
-    { SCE_CTRL_SELECT,   action_battle_reinforcements, 0 },
-    { SCE_CTRL_START,    action_battle_end_turn, 0 },
+    { ACT_LEFT,        action_battle_column_move, -1, 1 },
+    { ACT_RIGHT,       action_battle_column_move, 1, 1 },
+    { ACT_CONFIRM,     action_battle_column_click, 0 },
+    { ACT_BACK,        action_battle_column_cancel, 0 },
+    { ACT_ZOOM,        action_battle_zoom_toggle, 0 },
+    { ACT_SPELL,       action_battle_cast_spell, 0 },
+    { ACT_UP,          action_battle_row_move, 1, 1 },
+    { ACT_DOWN,        action_battle_row_move, -1, 1 },
+    { ACT_REMOVE,      action_battle_kill, 0 },
+    { ACT_REINFORCE,   action_battle_reinforcements, 0 },
+    { ACT_ENDTURN,     action_battle_end_turn, 0 },
 };
 #define NUM_BUTTON_ACTIONS (sizeof(button_actions) / sizeof(button_actions[0]))
 
@@ -459,34 +601,34 @@ static uint32_t poll_repeat_edges(void) {
     if (!s_eligible_built) {
         for (int i = 0; i < NUM_BUTTON_ACTIONS; i++) {
             if (button_actions[i].repeats) {
-                s_eligible |= button_actions[i].sce_button;
+                s_eligible |= 1u << button_actions[i].act;
             }
         }
         s_eligible_built = 1;
     }
 
-    static uint32_t s_button = 0;
+    static uint32_t s_act = 0;
     static uint64_t s_held_since_us = 0;
     static uint64_t s_last_fire_us = 0;
 
     uint64_t now_us = sceKernelGetProcessTimeWide();
-    uint32_t held  = current_buttons & s_eligible;
-    uint32_t fresh = pressed_buttons & s_eligible;
-    if (fresh || !(held & s_button)) {
+    uint32_t held  = acts_held & s_eligible;
+    uint32_t fresh = acts_pressed & s_eligible;
+    if (fresh || !(held & s_act)) {
         uint32_t pick = fresh ? fresh : held;
-        s_button = pick & (~pick + 1u);
+        s_act = pick & (~pick + 1u);
         s_held_since_us = now_us;
         s_last_fire_us = 0;
     }
 
-    if (!s_button || now_us - s_held_since_us < REPEAT_DELAY_US) {
+    if (!s_act || now_us - s_held_since_us < REPEAT_DELAY_US) {
         return 0;
     }
     if (s_last_fire_us && now_us - s_last_fire_us < REPEAT_RATE_US) {
         return 0;
     }
     s_last_fire_us = now_us;
-    return s_button;
+    return s_act;
 }
 
 void poll_pad() {
@@ -500,21 +642,19 @@ void poll_pad() {
     pressed_buttons = current_buttons & ~old_buttons;
     released_buttons = ~current_buttons & old_buttons;
 
-    {
-        static uint32_t old_stick_dpad = 0;
-        int stick_dx = (int)pad.lx - 128;
-        int stick_dy = (int)pad.ly - 128;
-        uint32_t stick_dpad = 0;
-        if (stick_dx < -LEFT_STICK_DPAD_DEADZONE) stick_dpad |= SCE_CTRL_LEFT;
-        if (stick_dx >  LEFT_STICK_DPAD_DEADZONE) stick_dpad |= SCE_CTRL_RIGHT;
-        if (stick_dy < -LEFT_STICK_DPAD_DEADZONE) stick_dpad |= SCE_CTRL_UP;
-        if (stick_dy >  LEFT_STICK_DPAD_DEADZONE) stick_dpad |= SCE_CTRL_DOWN;
+    uint32_t on = pad_on(&pad);
 
-        current_buttons  |= stick_dpad;
-        pressed_buttons  |= stick_dpad & ~old_stick_dpad;
-        released_buttons |= ~stick_dpad & old_stick_dpad;
-        old_stick_dpad = stick_dpad;
+    uint8_t hit[ACT_N], fire[ACT_N];
+    km_eval(&g_km, on, hit, fire);
+    uint32_t held = 0, landed = 0;
+    for (int a = 0; a < ACT_N; a++) {
+        if (hit[a]) held |= 1u << a;
+        if (fire[a]) landed |= 1u << a;
     }
+    acts_released = acts_held & ~held;
+    acts_held = held;
+    acts_pressed = landed;
+    skip_held = (on & ((1u << KM_RS_UP) - 1)) != 0;
 
     for (int i = 0; i < sizeof(mapping) / sizeof(ButtonMapping); i++) {
         if (pressed_buttons & mapping[i].sce_button) {
@@ -525,24 +665,24 @@ void poll_pad() {
         }
     }
 
-    uint32_t repeat_buttons = poll_repeat_edges();
+    uint32_t repeat_acts = poll_repeat_edges();
 
-    uint32_t claimed_buttons = 0;
+    uint32_t claimed = 0;
     for (int i = 0; i < NUM_BUTTON_ACTIONS; i++) {
-        uint32_t button = button_actions[i].sce_button;
-        uint32_t edges = pressed_buttons |
-                         (button_actions[i].repeats ? repeat_buttons : 0);
-        if (!(edges & button) || (claimed_buttons & button)) {
+        uint32_t act = 1u << button_actions[i].act;
+        uint32_t edges = acts_pressed |
+                         (button_actions[i].repeats ? repeat_acts : 0);
+        if (!(edges & act) || (claimed & act)) {
             continue;
         }
         if (button_actions[i].fn(button_actions[i].param)) {
-            claimed_buttons |= button;
+            claimed |= act_shares[button_actions[i].act];
         }
     }
 
-    poll_virtual_cursor(claimed_buttons);
+    poll_virtual_cursor(claimed);
 
-    poll_battle_pause_tap(claimed_buttons);
+    poll_battle_pause_tap(claimed);
 
     poll_stick(CONTROLS_STICK_LEFT, (float)pad.lx, (float)pad.ly, analog_lx, analog_ly, LEFT_ANALOG_DEADZONE);
     poll_stick(CONTROLS_STICK_RIGHT, (float)pad.rx, (float)pad.ry, analog_rx, analog_ry, RIGHT_ANALOG_DEADZONE);

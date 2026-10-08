@@ -23,6 +23,7 @@ extern "C"
 
 #define SCE_KERNEL_MEMBLOCK_TYPE_USER_RX (0x0C20D050)
 
+#include "osd.h"
 #include "utils/logger.h"
 #include "utils/dialog.h"
 #include "utils/init.h"
@@ -385,6 +386,7 @@ static void battle_offsets_verify_binary(void) {
 		(long long)size, EXPECTED_SO_SIZE,
 		post_val, EXPECTED_HUMAN_POSTACTION,
 		pull_val, EXPECTED_PLAYER_CANPULL);
+	osd_queue("Buttons off: an unknown game version. Touch still works.", 4000);
 }
 
 static int g_battle_selected_col = 0;
@@ -1168,6 +1170,58 @@ int map_pause_menu(void) {
 	return pushed;
 }
 
+static so_hook mapstate_ontap_hook;
+
+static int hook_MapState_OnTapCallback(void *self, void *pos) {
+	if (game_GameStateMachine_isStateTop && !game_GameStateMachine_isStateTop(self)) {
+		l_debug("[map-tap-guard] tap dropped: another screen is over the map");
+		return 0;
+	}
+	return SO_CONTINUE(int, mapstate_ontap_hook, self, pos);
+}
+
+#define IENGINE_MENUCAMPAIGNSELECT_OFFSET 0x17c
+
+static int (*game_SaveGame_isCampaignUnlock)(int) = NULL;
+
+int campaign_select_unlocked_ordinals(void) {
+	if (!g_struct_offsets_trusted || !game_Engine_getInstancePtr ||
+	    !game_GameStateMachine_isStateTop || !game_SaveGame_isCampaignUnlock) {
+		return -1;
+	}
+	int enabled = -1;
+	pthread_mutex_lock(&g_engine_call_mutex);
+	uint8_t *engine = (uint8_t *)game_Engine_getInstancePtr();
+	void *screen = engine ? *(void **)(engine + IENGINE_MENUCAMPAIGNSELECT_OFFSET) : NULL;
+	if (screen && game_GameStateMachine_isStateTop(screen)) {
+		enabled = 0;
+		for (int ordinal = 1; ordinal <= 5; ordinal++) {
+			if (game_SaveGame_isCampaignUnlock(ordinal)) {
+				enabled |= 1 << ordinal;
+			}
+		}
+	}
+	pthread_mutex_unlock(&g_engine_call_mutex);
+	return enabled;
+}
+
+static void campaign_select_patch(void) {
+	uintptr_t ontap = so_symbol(&so_mod,
+		"_ZN8MapState13OnTapCallbackEN5moFlo4Core8CVector2E");
+	if (ontap) {
+		mapstate_ontap_hook = hook_addr(ontap, (uintptr_t)&hook_MapState_OnTapCallback);
+	} else {
+		l_warn("campaign_select_patch: MapState::OnTapCallback not found, a tap "
+			"on a screen over the map still reaches the map");
+	}
+	game_SaveGame_isCampaignUnlock =
+		(int (*)(int)) so_symbol(&so_mod, "_ZN8SaveGame16isCampaignUnlockEi");
+	if (!game_SaveGame_isCampaignUnlock) {
+		l_warn("campaign_select_patch: SaveGame::isCampaignUnlock not found, the "
+			"campaign select takes a pick on the titles only");
+	}
+}
+
 static void gameplay_buttons_patch(void) {
 	game_Engine_getInstancePtr =
 		(void *(*)(void)) so_symbol(&so_mod, "_ZN6Engine14getInstancePtrEv");
@@ -1498,6 +1552,7 @@ void so_patch(void) {
 	battleintro_controls_patch();
 	battle_column_shift_patch();
 	gameplay_buttons_patch();
+	campaign_select_patch();
 	battle_mode_noop_patch();
 	fmod_errorcheck_patch();
 	fmod_audio_pump_patch();

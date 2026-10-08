@@ -55,4 +55,6 @@ typedef struct {
 void controls_init();
 void controls_poll();
 
+int controls_skip_held(void);
+
 #endif

@@ -73,6 +73,7 @@ set(PORT_SOURCES
     source/reimpl/pthr.c
     source/reimpl/sys.c
     source/utils/build_id.c
+    source/utils/campaign_tap.c
     source/utils/dialog.c
     source/utils/filelog.c
     source/utils/first_boot.c
@@ -114,6 +115,7 @@ set(PORT_SOURCES
     source/utils/watchdog.c
     source/reimpl/audio.c
     source/reimpl/controls.c
+    source/osd.c
 )
 set(SOURCES
     source/main.c
@@ -133,6 +135,7 @@ set(SOURCES
     source/reimpl/pthr.c
     source/reimpl/sys.c
     source/utils/build_id.c
+    source/utils/campaign_tap.c
     source/utils/dialog.c
     source/utils/filelog.c
     source/utils/first_boot.c
@@ -181,6 +184,8 @@ set(SOURCES
     lib/so_util/so_util.c
     source/reimpl/audio.c
     source/reimpl/controls.c
+    source/osd.c
+    lib/keymap/keymap.c
 )
 
 set(BUILD_ID_HEADER_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
